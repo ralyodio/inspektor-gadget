@@ -189,8 +189,26 @@ func (t *Tracer[Event]) attachUprobe(file *os.File) (link.Link, error) {
 	}
 	switch t.progType {
 	case ProgUprobe:
-		return ex.Uprobe(t.attachSymbol, t.prog, nil)
+		l, err := ex.Uprobe(t.attachSymbol, t.prog, nil)
+		if err == nil {
+			return l, nil
+		}
+		if !errors.Is(err, link.ErrNoSymbol) {
+			return nil, fmt.Errorf("attaching uprobe: %w", err)
+		}
+		// If the symbol was not found in the ELF symbol table, try
+		// resolving it from Go's .gopclntab section. This allows
+		// attaching uprobes to stripped Go binaries.
+		t.logger.Debugf("uprobe attach by symbol failed (%s), trying .gopclntab fallback", err)
+		addr, goErr := resolveGoSymbol(file, t.attachSymbol)
+		if goErr != nil {
+			return nil, fmt.Errorf("attaching uprobe (ELF: %w; gopclntab: %w)", err, goErr)
+		}
+		t.logger.Debugf("resolved %q from .gopclntab at address 0x%x", t.attachSymbol, addr)
+		return ex.Uprobe("", t.prog, &link.UprobeOptions{Address: addr})
 	case ProgUretprobe:
+		// Go uretprobes need Go-aware return handling because goroutine stacks can move.
+		// See https://github.com/inspektor-gadget/inspektor-gadget/pull/3552
 		return ex.Uretprobe(t.attachSymbol, t.prog, nil)
 	case ProgUSDT:
 		attachInfo, err := getUsdtInfo(attachPath, t.attachSymbol)
